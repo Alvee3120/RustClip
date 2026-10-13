@@ -50,7 +50,10 @@ impl X11 {
         let (conn, screen_num) = match x11rb::connect(None) {
             Ok(v) => v,
             Err(e) => {
-                log::warn(&format!("auto-paste unavailable: cannot open X display: {}", e));
+                log::warn(&format!(
+                    "auto-paste unavailable: cannot open X display: {}",
+                    e
+                ));
                 return None;
             }
         };
@@ -60,17 +63,14 @@ impl X11 {
         let min_keycode = setup.min_keycode;
         let max_keycode = setup.max_keycode;
 
-        let (keysyms_per_keycode, keysyms) = match xproto::get_keyboard_mapping(
-            &conn,
-            min_keycode,
-            max_keycode - min_keycode + 1,
-        )
-        .ok()
-        .and_then(|cookie| cookie.reply().ok())
-        {
-            Some(reply) => (reply.keysyms_per_keycode, reply.keysyms),
-            None => (0, Vec::new()),
-        };
+        let (keysyms_per_keycode, keysyms) =
+            match xproto::get_keyboard_mapping(&conn, min_keycode, max_keycode - min_keycode + 1)
+                .ok()
+                .and_then(|cookie| cookie.reply().ok())
+            {
+                Some(reply) => (reply.keysyms_per_keycode, reply.keysyms),
+                None => (0, Vec::new()),
+            };
 
         let net_active_window = xproto::intern_atom(&conn, false, b"_NET_ACTIVE_WINDOW")
             .ok()
@@ -186,7 +186,9 @@ impl X11 {
         if !self.usable() {
             return Err("XTEST or keyboard mapping unavailable".to_string());
         }
-        let ctrl = self.keycode(KEYSYM_CONTROL_L).ok_or("no Control_L keycode")?;
+        let ctrl = self
+            .keycode(KEYSYM_CONTROL_L)
+            .ok_or("no Control_L keycode")?;
         let v = self.keycode(KEYSYM_V).ok_or("no `v` keycode")?;
         log::debug(&format!("auto-paste: keycodes ctrl={} v={}", ctrl, v));
 
@@ -194,7 +196,9 @@ impl X11 {
         self.fake(KEY_PRESS, v)?;
         self.fake(KEY_RELEASE, v)?;
         self.fake(KEY_RELEASE, ctrl)?;
-        self.conn.flush().map_err(|e| format!("flush failed: {}", e))?;
+        self.conn
+            .flush()
+            .map_err(|e| format!("flush failed: {}", e))?;
         log::debug("auto-paste: sent Ctrl+V");
         Ok(())
     }

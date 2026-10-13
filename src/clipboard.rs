@@ -223,3 +223,22 @@ fn detect_kind(text: &str) -> Kind {
         Kind::Text
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::detect_kind;
+    use crate::storage::Kind;
+
+    #[test]
+    fn urls_are_detected_conservatively() {
+        assert_eq!(detect_kind("https://example.com/x"), Kind::Url);
+        assert_eq!(detect_kind("  http://a.b  "), Kind::Url);
+        assert_eq!(detect_kind("ftp://host/file"), Kind::Url);
+        assert_eq!(detect_kind("www.example.com"), Kind::Url);
+        // Anything with whitespace, or a bare domain, stays plain text.
+        assert_eq!(detect_kind("hello world"), Kind::Text);
+        assert_eq!(detect_kind("https://ex ample.com"), Kind::Text);
+        assert_eq!(detect_kind("example.com"), Kind::Text);
+        assert_eq!(detect_kind(""), Kind::Text);
+    }
+}

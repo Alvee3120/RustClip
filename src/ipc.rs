@@ -15,10 +15,10 @@
 //!   HIDE -> OK              QUIT   -> OK      CLEAR -> OK
 //!   anything else -> "ERR ..."
 
+use std::cell::RefCell;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use glib::ControlFlow;

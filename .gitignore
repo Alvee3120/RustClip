@@ -4,3 +4,6 @@
 # History/socket artifacts should never be committed (they live in $HOME).
 history.json
 *.sock
+
+# Command Code local state (taste/memory): tooling metadata, not source.
+.commandcode/

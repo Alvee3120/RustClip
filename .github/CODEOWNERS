@@ -1,0 +1,5 @@
+# Every path is owned by the maintainer. With "Require review from Code Owners"
+# enabled in the branch protection rules for `main` (see
+# scripts/protect-branch.sh), no change can be merged without the maintainer's
+# approval.
+* @Alvee3120

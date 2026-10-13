@@ -55,3 +55,39 @@ pub fn hash_bytes(bytes: &[u8]) -> u64 {
     }
     h
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gtk::gdk_pixbuf::Colorspace;
+
+    /// GdkPixbuf encoding/scaling is display-independent, so these run headless.
+    fn solid(w: i32, h: i32) -> Pixbuf {
+        let pb = Pixbuf::new(Colorspace::Rgb, true, 8, w, h).expect("pixbuf");
+        pb.fill(0x3366_99ff);
+        pb
+    }
+
+    #[test]
+    fn hash_is_stable_and_sensitive() {
+        assert_eq!(hash_bytes(b"hello"), hash_bytes(b"hello"));
+        assert_ne!(hash_bytes(b"hello"), hash_bytes(b"hellp"));
+    }
+
+    #[test]
+    fn encodes_png_magic() {
+        let png = encode_png(&solid(16, 16)).expect("png");
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+
+    #[test]
+    fn thumbnail_fits_box_without_upscaling() {
+        // 640x360 scaled to 40 px tall keeps the aspect ratio (71 px wide).
+        let t = thumbnail(&solid(640, 360), 40).expect("thumb");
+        assert_eq!((t.width(), t.height()), (71, 40));
+
+        // Smaller than the box: left alone, never upscaled.
+        let t = thumbnail(&solid(10, 10), 40).expect("thumb");
+        assert_eq!((t.width(), t.height()), (10, 10));
+    }
+}

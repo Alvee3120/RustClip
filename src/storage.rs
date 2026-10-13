@@ -335,8 +335,7 @@ impl Store {
         let json = serde_json::to_string(&file).map_err(|e| e.to_string())?;
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, json).map_err(|e| format!("{}: {}", tmp.display(), e))?;
-        std::fs::rename(&tmp, &self.path)
-            .map_err(|e| format!("{}: {}", self.path.display(), e))
+        std::fs::rename(&tmp, &self.path).map_err(|e| format!("{}: {}", self.path.display(), e))
     }
 }
 
@@ -345,4 +344,104 @@ fn now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An empty in-memory store. Text-only tests never touch the filesystem
+    /// (only image entries have sidecar files), so no XDG setup is needed.
+    fn store() -> Store {
+        Store {
+            path: PathBuf::from("/tmp/cliprust-unit-history.json"),
+            items: Vec::new(),
+            next_id: 1,
+        }
+    }
+
+    fn cfg() -> Config {
+        Config::default()
+    }
+
+    #[test]
+    fn duplicate_promotes_to_top() {
+        let mut s = store();
+        assert!(s.push_text(Kind::Text, "a".into(), &cfg()));
+        assert!(s.push_text(Kind::Text, "b".into(), &cfg()));
+        // Re-copying "a" moves it back to the top instead of duplicating.
+        assert!(s.push_text(Kind::Text, "a".into(), &cfg()));
+        assert_eq!(s.items.len(), 2);
+        assert_eq!(s.items[0].text, "a");
+        assert_eq!(s.items[1].text, "b");
+    }
+
+    #[test]
+    fn re_push_of_top_is_noop() {
+        let mut s = store();
+        s.push_text(Kind::Text, "a".into(), &cfg());
+        assert!(!s.push_text(Kind::Text, "a".into(), &cfg()));
+        assert_eq!(s.items.len(), 1);
+    }
+
+    #[test]
+    fn empty_text_is_ignored() {
+        let mut s = store();
+        assert!(!s.push_text(Kind::Text, String::new(), &cfg()));
+        assert!(s.items.is_empty());
+    }
+
+    #[test]
+    fn limit_evicts_oldest_unpinned_only() {
+        let mut s = store();
+        let mut c = cfg();
+        c.max_items = 2;
+        for t in ["1", "2", "3", "4"] {
+            s.push_text(Kind::Text, t.to_string(), &c);
+        }
+        let texts: Vec<&str> = s.items.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(texts, ["4", "3"]);
+
+        // A pinned entry survives eviction even when it is the oldest.
+        let three = s.items.iter().find(|i| i.text == "3").unwrap().id;
+        assert!(s.toggle_pin(three));
+        for t in ["5", "6"] {
+            s.push_text(Kind::Text, t.to_string(), &c);
+        }
+        assert!(s.items.iter().any(|i| i.text == "3" && i.pinned));
+    }
+
+    #[test]
+    fn toggle_pin_and_remove() {
+        let mut s = store();
+        s.push_text(Kind::Text, "x".into(), &cfg());
+        let id = s.items[0].id;
+        assert!(!s.items[0].pinned);
+        assert!(s.toggle_pin(id));
+        assert!(s.items[0].pinned);
+        assert!(s.toggle_pin(id));
+        assert!(!s.items[0].pinned);
+        assert!(s.remove(id));
+        assert!(s.items.is_empty());
+        assert!(!s.remove(id));
+    }
+
+    #[test]
+    fn clear_unpinned_keeps_pinned() {
+        let mut s = store();
+        s.push_text(Kind::Text, "a".into(), &cfg());
+        s.push_text(Kind::Text, "b".into(), &cfg());
+        let a = s.items.iter().find(|i| i.text == "a").unwrap().id;
+        assert!(s.toggle_pin(a));
+        s.clear_unpinned();
+        assert_eq!(s.items.len(), 1);
+        assert_eq!(s.items[0].text, "a");
+        assert!(s.items[0].pinned);
+    }
+
+    #[test]
+    fn preview_collapses_whitespace_and_truncates() {
+        assert_eq!(collapse_and_truncate("  a\n b\t c ", 10), "a b c");
+        assert_eq!(collapse_and_truncate("abcdef", 3), "abc…");
+    }
 }

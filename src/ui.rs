@@ -18,8 +18,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gtk::prelude::*;
 use gtk::pango;
+use gtk::prelude::*;
 
 use crate::log;
 use crate::paths;

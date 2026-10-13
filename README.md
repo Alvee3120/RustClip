@@ -273,6 +273,33 @@ The IPC socket path is `/proc`-free, built on `std::os::unix::net`, and
 single-instance safe: the daemon tries to *connect* before binding, so a second
 launch refuses to start rather than racing over the history file.
 
+## Development
+
+```sh
+cargo fmt --all
+cargo clippy --all-targets -- -D warnings
+cargo test                       # headless unit tests (no display needed)
+./scripts/smoke-test.sh          # end-to-end, isolated from your own session
+```
+
+The unit tests live next to the code (`storage`, `config`, `image`, URL
+detection) and run without an X server. The smoke test starts the real daemon
+against a private temp tree, drives the clipboard with `xclip`, and checks the
+JSON history and image sidecars; with no `$DISPLAY` it re-execs under `xvfb-run`.
+
+CI (`.github/workflows/ci.yml`) runs `fmt` + `clippy -D warnings` + tests + the
+release build, then the smoke test, on every push and pull request. Pushing a tag
+like `v0.1.0` triggers `.github/workflows/release.yml`, which builds the `.deb`
+with `cargo-deb` and attaches it to a GitHub Release.
+
+## Contributing
+
+Changes land through a pull request to `main`, and **every PR requires an
+approving review from the maintainer (@Alvee3120)**. `CODEOWNERS` marks every
+path as owned by them; `scripts/protect-branch.sh` applies the matching branch
+protection (no direct pushes, code-owner review required, CI must pass). See
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Troubleshooting
 
 - **Super+V does nothing.** Check the daemon is alive with `cliprust --ping`.

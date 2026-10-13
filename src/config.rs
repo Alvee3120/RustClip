@@ -8,21 +8,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::{log, paths};
 
-/// Image defaults live in consts so the `Default` impl and the serde
-/// `default = ...` hooks (used when upgrading an older config file that predates
-/// these keys) cannot drift apart.
+/// Image defaults live in consts so the `Default` impl and the struct-level
+/// `#[serde(default)]` below cannot drift apart.
 const DEFAULT_THUMBNAIL_PX: i32 = 40;
 const DEFAULT_IMAGE_SIZE_LIMIT_BYTES: u64 = 20 * 1024 * 1024;
 
-fn default_thumbnail_px() -> i32 {
-    DEFAULT_THUMBNAIL_PX
-}
-
-fn default_image_size_limit_bytes() -> u64 {
-    DEFAULT_IMAGE_SIZE_LIMIT_BYTES
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
+// Container-level default: *any* missing key is filled from `Default`, so a
+// hand-edited or older config never fails to parse just because a key is absent.
+// (`load` already falls back to a full default on parse failure, but this keeps
+// a partially-written config working too.)
+#[serde(default)]
 pub struct Config {
     /// Maximum number of *unpinned* history entries to retain. Pinned items are
     /// never evicted and are not counted against this limit.
@@ -48,12 +44,10 @@ pub struct Config {
     /// Height in pixels of the thumbnail stored for image entries. Width follows
     /// the aspect ratio (capped so ultra-wide images stay reasonable), and
     /// images smaller than the box are never upscaled.
-    #[serde(default = "default_thumbnail_px")]
     pub thumbnail_px: i32,
     /// Skip image clipboard payloads whose encoded PNG exceeds this many bytes.
     /// Kept separate from `size_limit_bytes` because images compress very
     /// differently from text.
-    #[serde(default = "default_image_size_limit_bytes")]
     pub image_size_limit_bytes: u64,
 }
 
@@ -110,5 +104,49 @@ impl Config {
         let path = paths::config_file();
         let pretty = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
         std::fs::write(&path, pretty).map_err(|e| format!("{}: {}", path.display(), e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_sane() {
+        let c = Config::default();
+        assert_eq!(c.max_items, 20);
+        assert!(!c.auto_paste);
+        assert_eq!(c.thumbnail_px, DEFAULT_THUMBNAIL_PX);
+        assert_eq!(c.image_size_limit_bytes, DEFAULT_IMAGE_SIZE_LIMIT_BYTES);
+    }
+
+    #[test]
+    fn empty_object_uses_defaults() {
+        let c: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(c.max_items, Config::default().max_items);
+        assert_eq!(c.thumbnail_px, DEFAULT_THUMBNAIL_PX);
+    }
+
+    #[test]
+    fn partial_config_fills_missing_keys() {
+        // Stands in for a config written before later keys existed.
+        let c: Config =
+            serde_json::from_str(r#"{"max_items":7,"auto_paste":true,"preview_chars":42}"#)
+                .unwrap();
+        assert_eq!(c.max_items, 7);
+        assert!(c.auto_paste);
+        assert_eq!(c.preview_chars, 42);
+        // Missing keys fall back to defaults rather than failing to parse.
+        assert_eq!(c.thumbnail_px, DEFAULT_THUMBNAIL_PX);
+        assert_eq!(c.popup_width, 520);
+    }
+
+    #[test]
+    fn round_trips_through_json() {
+        let c = Config::default();
+        let json = serde_json::to_string(&c).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.max_items, c.max_items);
+        assert_eq!(back.image_size_limit_bytes, c.image_size_limit_bytes);
     }
 }
