@@ -55,8 +55,17 @@ ok() { printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass + 1)); }
 bad() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail + 1)); }
 
 cleanup() {
+    local rc=$?
     "$BIN" --quit >/dev/null 2>&1 || true
     [ -n "$DAEMON" ] && kill "$DAEMON" 2>/dev/null || true
+    # Dump the daemon log when something went wrong, so CI failures are
+    # self-diagnosing instead of just a red X.
+    if [ "${fail:-0}" -gt 0 ] || [ "$rc" -ne 0 ]; then
+        echo
+        echo "---- daemon log (tail) ----" >&2
+        tail -40 "$WORK/daemon.log" >&2 2>/dev/null || true
+        echo "---------------------------" >&2
+    fi
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -78,7 +87,7 @@ echo "cliprust smoke test"
 echo "  binary: $BIN"
 echo "  state:  $WORK"
 
-"$BIN" >"$WORK/daemon.log" 2>&1 &
+"$BIN" >"$WORK/daemon.log" 2>&1 </dev/null &
 DAEMON=$!
 up=no
 for ((i = 0; i < 80; i++)); do
@@ -94,18 +103,21 @@ else
 fi
 
 # --- text ------------------------------------------------------------------
-printf 'smoke test text value' | xclip -selection clipboard
+# xclip forks a long-lived child to serve the selection. Redirect its output to
+# /dev/null so it cannot hold our stdout/stderr open, which would make a caller
+# that captures our output (e.g. a CI step) wait for it forever.
+printf 'smoke test text value' | xclip -selection clipboard >/dev/null 2>&1
 wait_for '"kind":"text"' && ok "text capture" || bad "text not captured"
 
 # --- url -------------------------------------------------------------------
-printf 'https://example.com/smoke' | xclip -selection clipboard
+printf 'https://example.com/smoke' | xclip -selection clipboard >/dev/null 2>&1
 wait_for '"kind":"url"' && ok "url capture" || bad "url not captured"
 
 # --- image -----------------------------------------------------------------
 base64 -d >"$WORK/px.png" <<'PNG'
 iVBORw0KGgoAAAANSUhEUgAAAMgAAABkCAYAAADDhn8LAAAABHNCSVQICAgIfAhkiAAAAR9JREFUeJzt0zERgDAAwMBSQbWGI6xSA72sMPwryJJr3c87gKP5dQD8mUEgGASCQSAYBIJBIBgEgkEgGASCQSAYBIJBIBgEgkEgGASCQSAYBIJBIBgEgkEgGASCQSAYBIJBIBgEgkEgGASCQSAYBIJBIBgEgkEgGASCQSAYBIJBIBgEgkEgGASCQSAYBIJBIBgEgkEgGASCQSAYBIJBIBgEgkEgGASCQSAYBIJBIBgEgkEgGASCQSAYBIJBIBgEgkEgGASCQSAYBIJBIBgEgkEgGASCQSAYBIJBIBgEgkEgGASCQSAYBIJBIBgEgkEgGASCQSAYBIJBIBgEgkEgGASCQSAYBIJBIBgEgkEgGATCBkbGAwJpxdu4AAAAAElFTkSuQmCC
 PNG
-xclip -selection clipboard -t image/png -i "$WORK/px.png"
+xclip -selection clipboard -t image/png -i "$WORK/px.png" >/dev/null 2>&1
 wait_for '"kind":"image"' && ok "image capture" || bad "image not captured"
 
 sidecar="$(sed -n 's/.*"file":"\([^"]*\)".*/\1/p' "$HIST" | head -1)"
@@ -131,7 +143,7 @@ if [ -f "$IMAGES/$sidecar" ] && [ -f "$IMAGES/$thumb" ]; then
 fi
 
 # --- de-duplication --------------------------------------------------------
-xclip -selection clipboard -t image/png -i "$WORK/px.png"
+xclip -selection clipboard -t image/png -i "$WORK/px.png" >/dev/null 2>&1
 sleep 0.6
 if [ "$(kind_count image)" = 1 ]; then
     ok "re-copied image de-duplicated"

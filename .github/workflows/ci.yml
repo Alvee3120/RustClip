@@ -61,4 +61,6 @@ jobs:
         run: cargo build --release
 
       - name: End-to-end smoke test
-        run: ./scripts/smoke-test.sh
+        # Invoked via `bash` on purpose: some checkouts (e.g. Windows filesystems
+        # without the execute bit) cannot represent the +x flag.
+        run: bash scripts/smoke-test.sh

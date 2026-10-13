@@ -37,6 +37,19 @@ the clipboard with `xclip`, and asserts on the JSON history and image sidecars.
 It needs a display but no window manager; with no `$DISPLAY` it re-execs itself
 under `xvfb-run`, so it works unchanged in CI.
 
+## A note on file modes
+
+If you clone onto a filesystem that cannot store the Unix execute bit (NTFS, most
+external drives), git reports `core.fileMode=false` and new `*.sh` files are
+committed as `100644`. Mark them executable in the index explicitly:
+
+```sh
+git update-index --chmod=+x scripts/smoke-test.sh install.sh
+```
+
+CI and the docs invoke the scripts via `bash …` where possible, but `install.sh`
+and `scripts/*.sh` are meant to be runnable directly.
+
 ## Releases (maintainers)
 
 1. Bump `version` in `Cargo.toml` and commit.
