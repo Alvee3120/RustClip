@@ -2,11 +2,12 @@
 //!
 //! Design choices worth calling out:
 //!
-//! * The window is built lazily on the first `show` and then *hidden*, not
-//!   destroyed. Rebuilding a GtkWindow means reconnecting signal handlers,
-//!   which is error-prone; hiding keeps a few KB of widget tree alive. If you
-//!   want to chase the last megabyte of idle RAM, destroy it in `hide` and
-//!   rebuild in `ensure_window` (documented in the README).
+//! * The window is built lazily on the first `show` and destroyed again in
+//!   `hide` (from an idle callback, so widgets are never torn down mid-event),
+//!   which frees the rows and their thumbnails between uses; `ensure_window`
+//!   rebuilds it on the next show.
+//! * It is decoration-less, so the top row carries a title and a close button
+//!   (Esc and focus-loss still close it too).
 //! * Positioned with `WindowPosition::Mouse` so it appears under the pointer,
 //!   matching Win+V muscle memory. Cinnamon's WM keeps it centred otherwise.
 //! * It is a decoration-less `Toplevel` with a `PopupMenu` type hint: it looks
@@ -59,6 +60,29 @@ fn ensure_window(app: &Rc<RefCell<App>>) {
     listbox.set_selection_mode(gtk::SelectionMode::Single);
     scroller.add(&listbox);
 
+    // Header: a title plus a close button. The window is decoration-less, so
+    // this is how you close it with the mouse (Esc still works).
+    let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    header.set_margin_top(4);
+    header.set_margin_bottom(4);
+    header.set_margin_start(8);
+    header.set_margin_end(4);
+
+    let title = gtk::Label::new(Some("Clipboard History"));
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+    title.set_sensitive(false);
+    header.pack_start(&title, true, true, 0);
+
+    let close = gtk::Button::from_icon_name(Some("window-close"), gtk::IconSize::Menu);
+    close.set_relief(gtk::ReliefStyle::None);
+    close.set_tooltip_text(Some("Close (Esc)"));
+    {
+        let app_close = app.clone();
+        close.connect_clicked(move |_| hide(&app_close));
+    }
+    header.pack_end(&close, false, false, 0);
+
     // Footer with the key hints, so pin/delete/clear are discoverable without a
     // manual — the same role Win+V's per-row buttons play.
     let footer = gtk::Label::new(Some(
@@ -72,6 +96,7 @@ fn ensure_window(app: &Rc<RefCell<App>>) {
     footer.set_ellipsize(pango::EllipsizeMode::End);
 
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    vbox.pack_start(&header, false, false, 0);
     vbox.pack_start(&scroller, true, true, 0);
     vbox.pack_start(&footer, false, false, 0);
     window.add(&vbox);

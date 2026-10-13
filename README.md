@@ -73,7 +73,8 @@ autostart entry created.
 | `cliprust --help` / `--version` | Help / version |
 
 **Inside the popup:** `↑`/`↓` move, `Enter` copies the highlighted item, `1`–`9`
-copy item by position, `Esc` closes. Clicking outside (focus loss) also closes.
+copy item by position, `Esc` closes. The header carries a `✕` button to close it
+with the mouse, and clicking outside (focus loss) closes it too.
 Text and URL rows copy their text back; **image rows put the original PNG back
 on the clipboard**. The footer line lists the editing keys:
 
