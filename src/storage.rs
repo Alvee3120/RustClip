@@ -44,6 +44,15 @@ pub struct Item {
     pub pinned: bool,
     /// Unix seconds when the entry was last seen (promoted on duplicate).
     pub created: u64,
+    /// Content hash for `Image` entries; used to promote a re-copied image
+    /// instead of storing a duplicate.
+    #[serde(default)]
+    pub hash: Option<u64>,
+    /// Pixel dimensions for `Image` entries (shown in the row preview).
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
 }
 
 impl Item {
@@ -59,7 +68,10 @@ impl Item {
     /// One-line preview collapsed to a single line and truncated to `chars`.
     pub fn preview(&self, chars: usize) -> String {
         match self.kind {
-            Kind::Image => "(image)".to_string(),
+            Kind::Image => match (self.width, self.height) {
+                (Some(w), Some(h)) => format!("Image {}×{}", w, h),
+                _ => "(image)".to_string(),
+            },
             _ => collapse_and_truncate(&self.text, chars),
         }
     }
@@ -168,11 +180,81 @@ impl Store {
                     thumb: None,
                     pinned: false,
                     created: now(),
+                    hash: None,
+                    width: None,
+                    height: None,
                 },
             );
         }
         self.enforce_limit(cfg);
         true
+    }
+
+    /// Insert an image entry at the top.
+    ///
+    /// `png` is the encoded full-size sidecar and `thumb` the optional
+    /// thumbnail; both are written into the images dir under names derived from
+    /// the allocated id. A re-copy of an identical image (same `hash`) is
+    /// *promoted* rather than duplicated, matching the text behaviour. Returns
+    /// true when the history actually changed.
+    pub fn push_image(
+        &mut self,
+        png: &[u8],
+        thumb: Option<&[u8]>,
+        hash: u64,
+        width: u32,
+        height: u32,
+        cfg: &Config,
+    ) -> Result<bool, String> {
+        if let Some(pos) = self
+            .items
+            .iter()
+            .position(|it| it.kind == Kind::Image && it.hash == Some(hash))
+        {
+            let mut existing = self.items.remove(pos);
+            existing.created = now();
+            // Already at the top? Nothing changed.
+            if pos == 0 {
+                self.items.insert(0, existing);
+                return Ok(false);
+            }
+            self.items.insert(0, existing);
+            return Ok(true);
+        }
+
+        let id = self.next_id();
+        let dir = paths::image_dir();
+        paths::ensure_dir(&dir)?;
+        let file = format!("{}.png", id);
+        let thumb_name = thumb.map(|_| format!("{}.thumb.png", id));
+
+        std::fs::write(dir.join(&file), png)
+            .map_err(|e| format!("{}: {}", dir.join(&file).display(), e))?;
+        if let (Some(name), Some(bytes)) = (&thumb_name, thumb) {
+            // A missing thumbnail is recoverable (the row falls back to a
+            // generic icon), so keep the entry rather than failing the capture.
+            if let Err(e) = std::fs::write(dir.join(name), bytes) {
+                log::warn(&format!("could not write thumbnail {}: {}", name, e));
+            }
+        }
+
+        self.items.insert(
+            0,
+            Item {
+                id,
+                kind: Kind::Image,
+                text: String::new(),
+                file: Some(file),
+                thumb: thumb_name,
+                pinned: false,
+                created: now(),
+                hash: Some(hash),
+                width: Some(width),
+                height: Some(height),
+            },
+        );
+        self.enforce_limit(cfg);
+        Ok(true)
     }
 
     /// Drop the oldest *unpinned* entries beyond `cfg.max_items`. Image files

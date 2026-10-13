@@ -6,7 +6,8 @@
 //!
 //! Monitoring is fully event-driven: GTK's `owner-change` signal fires whenever
 //! the selection owner changes, so there is zero polling and therefore zero CPU
-//! while idle. Stage 1 handles text and URLs; images arrive in stage 2.
+//! while idle. Text, URLs and images are all captured; images are encoded to PNG
+//! sidecars (plus a thumbnail) by the storage layer.
 //!
 //! On X11 this is exactly what we want. On Wayland GTK3 cannot observe other
 //! clients' clipboard changes at all — see README for the consequences.
@@ -16,6 +17,8 @@ use std::rc::Rc;
 
 use gtk::prelude::*;
 
+use crate::config::Config;
+use crate::image;
 use crate::log;
 use crate::storage::Kind;
 use crate::App;
@@ -41,26 +44,39 @@ pub fn start(app: &Rc<RefCell<App>>) {
 
 /// Handle a single owner-change event.
 ///
-/// Note on blocking: `wait_for_targets`/`wait_for_text` synchronously ask the
-/// selection owner for data. For a local X11 clipboard this completes in well
-/// under a millisecond; if the owning application is wedged the call can block
-/// briefly, which is the accepted tradeoff for the simplicity of not threading
-/// asynchronous clipboard requests through the main loop.
+/// Note on blocking: `wait_for_targets`/`wait_for_image`/`wait_for_text`
+/// synchronously ask the selection owner for data. For a local X11 clipboard
+/// this completes in well under a millisecond; if the owning application is
+/// wedged the call can block briefly, which is the accepted tradeoff for the
+/// simplicity of not threading asynchronous clipboard requests through the main
+/// loop.
 fn on_owner_change(app: &Rc<RefCell<App>>, clipboard: &gtk::Clipboard) {
-    let ignore_hint = app.borrow().config.ignore_password_hint;
-    if ignore_hint && advertises_password_hint(clipboard) {
+    let cfg = app.borrow().config.clone();
+
+    // One round-trip for the target list; reused for both the password-manager
+    // check and the image-vs-text decision below.
+    let targets = clipboard.wait_for_targets().unwrap_or_default();
+
+    if cfg.ignore_password_hint && targets.iter().any(is_password_hint) {
         log::debug("skipping clipboard change: password-manager hint present");
         return;
     }
 
-    // Stage 1: text/URL only. `None` means the payload is non-text (e.g. an
-    // image); stage 2 will handle that case via request_image.
+    // Prefer an image when the payload offers one: copying a picture often also
+    // exports its URL or alt text as a text target, and the picture is what the
+    // user meant to keep.
+    if targets.iter().any(is_image_target) {
+        if let Some(pixbuf) = clipboard.wait_for_image() {
+            handle_image(app, &pixbuf, &cfg);
+            return;
+        }
+    }
+
     let text = match clipboard.wait_for_text() {
         Some(t) => t.to_string(),
         None => return,
     };
 
-    let cfg = app.borrow().config.clone();
     if text.len() as u64 > cfg.size_limit_bytes {
         log::debug(&format!(
             "skipping {}-byte text (limit {} bytes)",
@@ -99,28 +115,109 @@ fn on_owner_change(app: &Rc<RefCell<App>>, clipboard: &gtk::Clipboard) {
     }
 }
 
+/// Capture an image payload: encode it to PNG, build a thumbnail, and hand both
+/// to the store. Runs entirely on the main thread, like the text path.
+fn handle_image(app: &Rc<RefCell<App>>, pixbuf: &gtk::gdk_pixbuf::Pixbuf, cfg: &Config) {
+    let (width, height) = (pixbuf.width(), pixbuf.height());
+    if width <= 0 || height <= 0 {
+        return;
+    }
+
+    let png = match image::encode_png(pixbuf) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            log::warn(&format!("could not encode clipboard image: {}", e));
+            return;
+        }
+    };
+    if png.len() as u64 > cfg.image_size_limit_bytes {
+        log::debug(&format!(
+            "skipping {}-byte image (limit {} bytes)",
+            png.len(),
+            cfg.image_size_limit_bytes
+        ));
+        return;
+    }
+    let hash = image::hash_bytes(&png);
+
+    // Ignore the echo of our own image paste-back, mirroring the text path.
+    {
+        let mut a = app.borrow_mut();
+        if a.last_own_write_hash == Some(hash) {
+            a.last_own_write_hash = None;
+            log::debug("ignoring clipboard echo of our own image write");
+            return;
+        }
+    }
+
+    // A missing thumbnail is not fatal: the row falls back to a generic icon.
+    let thumb = match image::thumbnail(pixbuf, cfg.thumbnail_px)
+        .map(|t| image::encode_png(&t))
+        .transpose()
+    {
+        Ok(t) => t,
+        Err(e) => {
+            log::warn(&format!("thumbnail encode failed: {}", e));
+            None
+        }
+    };
+
+    let changed = {
+        let mut a = app.borrow_mut();
+        match a.store.push_image(
+            &png,
+            thumb.as_deref(),
+            hash,
+            width as u32,
+            height as u32,
+            cfg,
+        ) {
+            Ok(changed) => {
+                if changed {
+                    if let Err(e) = a.store.save() {
+                        log::error(&format!("history save failed: {}", e));
+                    }
+                }
+                changed
+            }
+            Err(e) => {
+                log::error(&format!("could not store image: {}", e));
+                false
+            }
+        }
+    };
+
+    if changed {
+        crate::ui::refresh_if_visible(app);
+    }
+}
+
 /// True when the clipboard advertises the KDE "this is a secret" hint target,
 /// which KeePassXC and other password managers set. We check only for the
 /// target's *presence*: reading its value requires an extra round-trip and the
 /// convention is that presence alone means "do not record".
-fn advertises_password_hint(clipboard: &gtk::Clipboard) -> bool {
-    // `wait_for_targets` yields `gdk::Atom`s; `Atom::name` resolves them to the
-    // target string. `Atom` is Copy, so dereferencing in the closure is fine.
-    match clipboard.wait_for_targets() {
-        Some(targets) => targets.iter().any(|t| {
-            let name = t.name();
-            name.as_str() == "x-kde-passwordManagerHint"
-                || name.as_str() == "application/x-kde-passwordManagerHint"
-        }),
-        None => false,
-    }
+fn is_password_hint(atom: &gtk::gdk::Atom) -> bool {
+    let name = atom.name();
+    name.as_str() == "x-kde-passwordManagerHint"
+        || name.as_str() == "application/x-kde-passwordManagerHint"
 }
 
-/// Classify text as a URL only when it looks unambiguous: an http(s) scheme and
-/// no internal whitespace. Everything else is plain text.
+/// True for any `image/*` target, which is how we decide a change carries an
+/// image rather than (or in addition to) text.
+fn is_image_target(atom: &gtk::gdk::Atom) -> bool {
+    atom.name().as_str().starts_with("image/")
+}
+
+/// Classify text as a URL only when it looks unambiguous: a known scheme with no
+/// internal whitespace, or a bare `www.`-prefixed host. Everything else is plain
+/// text. Deliberately conservative so we do not badger ordinary prose.
 fn detect_kind(text: &str) -> Kind {
     let t = text.trim();
-    if (t.starts_with("http://") || t.starts_with("https://")) && !t.contains(char::is_whitespace) {
+    if t.contains(char::is_whitespace) {
+        return Kind::Text;
+    }
+    const SCHEMES: [&str; 5] = ["http://", "https://", "ftp://", "ftps://", "www."];
+    if SCHEMES.iter().any(|s| t.starts_with(s)) {
         Kind::Url
     } else {
         Kind::Text

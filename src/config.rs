@@ -8,6 +8,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::{log, paths};
 
+/// Image defaults live in consts so the `Default` impl and the serde
+/// `default = ...` hooks (used when upgrading an older config file that predates
+/// these keys) cannot drift apart.
+const DEFAULT_THUMBNAIL_PX: i32 = 40;
+const DEFAULT_IMAGE_SIZE_LIMIT_BYTES: u64 = 20 * 1024 * 1024;
+
+fn default_thumbnail_px() -> i32 {
+    DEFAULT_THUMBNAIL_PX
+}
+
+fn default_image_size_limit_bytes() -> u64 {
+    DEFAULT_IMAGE_SIZE_LIMIT_BYTES
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
     /// Maximum number of *unpinned* history entries to retain. Pinned items are
@@ -31,6 +45,16 @@ pub struct Config {
     /// Milliseconds to wait between hiding the popup and synthesising Ctrl+V,
     /// so the target window has time to regain focus.
     pub paste_delay_ms: u64,
+    /// Height in pixels of the thumbnail stored for image entries. Width follows
+    /// the aspect ratio (capped so ultra-wide images stay reasonable), and
+    /// images smaller than the box are never upscaled.
+    #[serde(default = "default_thumbnail_px")]
+    pub thumbnail_px: i32,
+    /// Skip image clipboard payloads whose encoded PNG exceeds this many bytes.
+    /// Kept separate from `size_limit_bytes` because images compress very
+    /// differently from text.
+    #[serde(default = "default_image_size_limit_bytes")]
+    pub image_size_limit_bytes: u64,
 }
 
 impl Default for Config {
@@ -44,6 +68,8 @@ impl Default for Config {
             popup_height: 480,
             preview_chars: 80,
             paste_delay_ms: 120,
+            thumbnail_px: DEFAULT_THUMBNAIL_PX,
+            image_size_limit_bytes: DEFAULT_IMAGE_SIZE_LIMIT_BYTES,
         }
     }
 }

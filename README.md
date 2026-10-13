@@ -14,12 +14,15 @@ Development proceeds in stages, with a stop for review between each:
 | Stage | Scope | State |
 |-------|-------|-------|
 | 1 | Text-only MVP: daemon, capture, popup, copy-back, persistence, IPC, installer | **done, built & verified** |
-| 2 | Images + links (thumbnails, PNG sidecars, URL detection/icon) | planned |
-| 3 | Pinning, per-item delete, "Clear all", autostart polish | planned |
-| 4 | Auto-paste (Ctrl+V), `.deb` packaging, size/RAM tuning | planned |
+| 2 | Images + links (thumbnails, PNG sidecars, URL detection/icon) | **done, built & verified** |
+| 3 | Pinning, per-item delete, "Clear all", autostart polish | **done, built & verified** |
+| 4 | Auto-paste (Ctrl+V), `.deb` packaging, size/RAM tuning | **done, built & verified** |
 
-Stage 1 ships a working end-to-end text clipboard history. Image rows are stored
-and listed but cannot yet be copied back or previewed.
+Stages 1–4 ship a complete history for text, URLs and images: captures are
+written to disk (images as PNG sidecars with a small thumbnail), listed in the
+popup, and copied back on selection. Items can be pinned, deleted individually,
+or cleared in bulk. With `auto_paste` enabled, selecting an item also sends Ctrl+V
+to the window you were in. A `.deb` can be built with `cargo deb`.
 
 ## Requirements
 
@@ -52,7 +55,10 @@ Skip the apt step if the build deps are already installed:
 ```
 
 After it finishes, press **Super+V**. The daemon also starts automatically at
-your next login via `~/.config/autostart/cliprust.desktop`.
+your next login via `~/.config/autostart/cliprust.desktop` (a couple of seconds
+after login — `X-GNOME-Autostart-Delay=2` — so the session is ready first). Pass
+`--no-autostart` if you would rather launch the daemon yourself and not have an
+autostart entry created.
 
 ## Usage
 
@@ -62,11 +68,24 @@ your next login via `~/.config/autostart/cliprust.desktop`.
 | `cliprust --toggle` | Show/hide the popup — this is what Super+V runs |
 | `cliprust --show` / `--hide` | Force the popup visible / hidden |
 | `cliprust --ping` | `PONG` if the daemon is running |
+| `cliprust --clear` | Remove all unpinned entries (pinned are kept) |
 | `cliprust --quit` | Ask the daemon to exit |
 | `cliprust --help` / `--version` | Help / version |
 
 **Inside the popup:** `↑`/`↓` move, `Enter` copies the highlighted item, `1`–`9`
 copy item by position, `Esc` closes. Clicking outside (focus loss) also closes.
+Text and URL rows copy their text back; **image rows put the original PNG back
+on the clipboard**. The footer line lists the editing keys:
+
+| Key | Action |
+|-----|--------|
+| `P` | Pin/unpin the highlighted item (pinned items survive eviction and clears) |
+| `Delete` | Remove the highlighted item |
+| `Ctrl+Delete` | Remove every unpinned item (pinned are kept) |
+
+Pinned items are shown with a "pinned" marker and keep their position in the
+list; they are simply exempt from eviction and from "clear". Interactively,
+Ctrl+Delete and `cliprust --clear` do the same thing.
 
 Set verbosity with `CLIPRUST_LOG`:
 
@@ -77,7 +96,8 @@ CLIPRUST_LOG=debug cliprust
 ## Configuration
 
 Edit `~/.config/cliprust/config.json` (created on first run; restart the daemon
-after editing):
+after editing). Missing keys fall back to their defaults, so a config written by
+an older version keeps working:
 
 | Key | Default | Meaning |
 |-----|---------|---------|
@@ -88,10 +108,12 @@ after editing):
 | `popup_width` / `popup_height` | `520` / `480` | Popup size in pixels |
 | `preview_chars` | `80` | Characters shown per row |
 | `paste_delay_ms` | `120` | Delay before auto-paste (focus hand-back time) |
+| `thumbnail_px` | `40` | Thumbnail height for image rows (width follows the aspect ratio) |
+| `image_size_limit_bytes` | `20971520` | Skip clipboard images whose encoded PNG exceeds this (20 MB) |
 
 **State locations:** history in `~/.local/share/cliprust/history.json`, images
-(stage 2) in `~/.local/share/cliprust/images/`, config in
-`~/.config/cliprust/`, IPC socket in `$XDG_RUNTIME_DIR/cliprust/ipc.sock`.
+(full PNG plus a thumbnail sidecar) in `~/.local/share/cliprust/images/`, config
+in `~/.config/cliprust/`, IPC socket in `$XDG_RUNTIME_DIR/cliprust/ipc.sock`.
 
 ## Uninstall
 
@@ -113,18 +135,26 @@ does the same thing), or just run `./install.sh --uninstall`.
 
 ## Auto-paste
 
-Off by default. When enabled (`auto_paste: true`), selecting an item first
-copies it, then after `paste_delay_ms` re-activates the previously focused
-window and synthesises Ctrl+V via the X11 XTEST extension.
+Off by default. When enabled (`auto_paste: true`), selecting an item copies it,
+hides the popup, re-activates the window that was focused before the popup
+opened, waits `paste_delay_ms`, and finally synthesises Ctrl+V via the X11 XTEST
+extension — so the item lands where you were typing.
 
 Why it is opt-in: to receive `↑`/`↓`/`Enter` the popup must take keyboard focus,
-which means the window you were typing in stops being focused. Auto-paste has to
-remember that window, hand focus back, and *then* send the key — a race that is
-usually reliable but not guaranteed. If you see the key land in the wrong place,
-raise `paste_delay_ms`.
+so the window you were typing in stops being focused. Auto-paste has to remember
+that window, hand focus back, and *then* send the key — a race that is usually
+reliable but not guaranteed. If you see the key land in the wrong place, raise
+`paste_delay_ms`.
 
-> Not yet implemented: the key-synthesis step lands in **stage 4**. Until then
-> the flag is accepted and logged but does nothing.
+Implementation notes:
+
+- The previously focused window is captured from `_NET_ACTIVE_WINDOW` (falling
+  back to the input focus) just before the popup is shown.
+- Focus hand-back uses the EWMH `_NET_ACTIVE_WINDOW` client message carrying the
+  real event timestamp, because window managers reject a zero timestamp.
+- Key synthesis uses XTEST via `x11rb`. If the display has no XTEST (or no
+  `v`/Control keycodes) the daemon logs a warning once at startup and auto-paste
+  does nothing rather than misbehaving. `CLIPRUST_LOG=debug` shows each step.
 
 ## Wayland
 
@@ -156,9 +186,13 @@ cargo install cargo-deb
 cargo deb
 ```
 
-The `.deb` installs `/usr/bin/cliprust`. Note that the package installs the
-binary only — the autostart entry and Super+V binding are per-user and are still
-best set by `install.sh`.
+This produces `target/debian/cliprust_<version>_amd64.deb` (~220 KB). It installs
+`/usr/bin/cliprust`, the README and the licence under `/usr/share/doc/cliprust/`,
+and declares the runtime libraries it links against (GTK3, GdkPixbuf, glib, libc)
+via `depends = "$auto"`.
+
+The package installs the **binary only** — the autostart entry and Super+V
+binding are per-user and are still best set by `install.sh`.
 
 ## Size and idle RAM
 
@@ -168,8 +202,8 @@ Rust 1.99.0, 8 cores, with the release profile (`opt-level="z"`, `lto="fat"`,
 
 | Metric | Measured |
 |--------|----------|
-| Binary on disk | **400 KB** (408,008 bytes), stripped, dynamically linked |
-| Idle RSS (daemon up, popup never shown) | **28.6 MB** (28,648 kB) |
+| Binary on disk | **512 KB** (524,080 bytes), stripped, dynamically linked |
+| Idle RSS (daemon up, popup never shown) | **28.5 MB** (29,176 kB) |
 | Idle CPU | ~0% (event-driven; no polling) |
 | Threads | 4 |
 | Popup window | 520 px wide (per `popup_width`) |
@@ -182,9 +216,18 @@ pid=$(pgrep -x cliprust); grep VmRSS /proc/$pid/status
 ```
 
 The binary is small because GTK is linked **dynamically** — it is not baked into
-the executable.
+the executable. Images add no crate: GdkPixbuf (already part of GTK) encodes and
+decodes the PNG sidecars. Auto-paste adds one crate (`x11rb`): it costs ~60 kB of
+RSS and no extra idle thread.
 
-**On the spec's `<20 MB` idle-RAM goal:** 28.6 MB is the honest number and it
+**Popup cost.** Idle is ~28.5 MB; opening the popup for the first time raises RSS
+to ~37 MB and it stays there. That ~8 MB is one-time GTK window/graphics
+initialisation, not per-row memory. `hide()` now *destroys* the popup window
+(rebuilding it on the next show) so the row widgets and thumbnails are freed —
+verified by watching the X window disappear — but the freed pages are not handed
+back to the OS, so RSS does not fall.
+
+**On the spec's `<20 MB` idle-RAM goal:** 28.5 MB is the honest number and it
 does not meet the goal. That floor is GTK's: glib/pango/gdk-pixbuf/Cairo/fontconfig
 are mapped as soon as GTK initialises, *before* any window exists, so unlike
 binary size it cannot be tuned away with compiler flags. Getting under 20 MB
@@ -192,29 +235,39 @@ requires not using GTK for the popup at all (a raw X11 window lands around
 3–6 MB, at the cost of theming and a lot more code). This tradeoff was raised
 during planning and GTK3 was chosen deliberately.
 
-Further reductions, in order of impact:
+Measured results, in order of impact:
 
-1. **Destroy** the popup window in `hide()` instead of hiding it (rebuild in
-   `ensure_window`): saves the widget tree after first use. The code is written
-   to make this a small change.
-2. Benchmark `opt-level = "3"` vs `"z"`. `"z"` minimises size but can be *slower*
-   and occasionally larger after LTO; pick whichever wins for you.
+1. **Destroy the popup on hide** — done. The window really is destroyed between
+   uses (verified), but as noted above it does not move RSS: the ~8 MB belongs to
+   GTK's one-time window/graphics setup, not to the widget tree.
+2. **`opt-level`:** benchmarked `"z"` against `3`. `"z"` wins on size — **512 KB**
+   versus **581 KB** (595,368 bytes) for `3` — so the release profile keeps `"z"`.
+   Both use `lto="fat"`, `codegen-units=1`, `panic="abort"`, `strip=true`.
 3. Trim with `cargo-bloat` / `twiggy` to see what dominates the binary.
-4. If RAM matters far more than theming, the non-GTK X11 popup is the only way
-   to get under ~10 MB.
+4. If RAM matters far more than theming, the non-GTK X11 popup is the only way to
+   get under ~10 MB — and it is also where the ~8 MB popup cost would disappear.
 
 ## Design notes / dependencies
 
-Only four crates, each justified in `Cargo.toml`:
+Five crates, each justified in `Cargo.toml`:
 
 - `gtk` — clipboard `owner-change`, the popup, and Cinnamon-matching widgets.
+  Also brings **GdkPixbuf**, which encodes/decodes the image PNG sidecars and
+  scales thumbnails, so no separate image crate is needed.
 - `glib` — main-loop integration for the IPC socket (`unix_fd_add_local`).
 - `serde` + `serde_json` — the JSON history/config.
+- `x11rb` — XTEST key synthesis and EWMH focus handling for auto-paste. Pure Rust
+  (no libxcb, no C build step); only the `xtest` feature is enabled.
 
 Deliberately avoided: `rusqlite` (C build for a ≤20-row dataset), `image`/`png`
 (GdkPixbuf already decodes and thumbnails PNG), `log`/`env_logger` (a ~40-line
-stderr logger in `src/log.rs` suffices), and `xdotool`/`x11rb` (only needed once
-auto-paste is implemented).
+stderr logger in `src/log.rs` suffices), and `xdotool` (shelling out to an
+external tool is worse than the few XTEST calls we make directly).
+
+**Image memory:** a captured pixbuf is encoded to PNG and dropped immediately;
+only the two small sidecar files remain on disk. Thumbnails are generated once,
+at capture time, so the popup never scales an image while drawing. Nothing
+image-sized is retained by the daemon between captures.
 
 The IPC socket path is `/proc`-free, built on `std::os::unix::net`, and
 single-instance safe: the daemon tries to *connect* before binding, so a second
@@ -227,7 +280,13 @@ launch refuses to start rather than racing over the history file.
   binding in *System Settings → Keyboard → Shortcuts → Custom Shortcuts*.
 - **Popup opens in the wrong place.** It uses `WindowPosition::Mouse`; some WMs
   override it. This is cosmetic.
-- **Image copies are ignored.** Expected in stage 1; image support is stage 2.
+- **Auto-paste does nothing.** It is off by default — set `auto_paste: true` and
+  restart the daemon. Run with `CLIPRUST_LOG=debug`: if XTEST is unavailable the
+  daemon logs a warning at startup. If the paste lands in the wrong window, raise
+  `paste_delay_ms`.
+- **An image row shows a generic icon instead of a thumbnail.** Its thumbnail
+  sidecar is missing or unreadable; the entry still copies back. Delete the item
+  to prune the stale entry.
 - **Nothing is recorded from my password manager.** That is the
   `x-kde-passwordManagerHint` exclusion working as intended.
 - **Startup fails with `path must be shorter than SUN_LEN`.** `XDG_RUNTIME_DIR`

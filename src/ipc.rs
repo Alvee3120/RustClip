@@ -12,7 +12,8 @@
 //!
 //! Protocol: one command per connection, one reply line back.
 //!   PING -> PONG            TOGGLE -> OK      SHOW -> OK
-//!   HIDE -> OK              QUIT   -> OK      anything else -> "ERR ..."
+//!   HIDE -> OK              QUIT   -> OK      CLEAR -> OK
+//!   anything else -> "ERR ..."
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::io::AsRawFd;
@@ -118,6 +119,10 @@ fn dispatch(app: &Rc<RefCell<App>>, cmd: &str) -> String {
         "QUIT" => {
             ui::hide(app);
             gtk::main_quit();
+            "OK".to_string()
+        }
+        "CLEAR" => {
+            ui::clear_history(app);
             "OK".to_string()
         }
         other => format!("ERR unknown command: {}", other),

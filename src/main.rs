@@ -9,8 +9,10 @@
 //! loop, so the daemon is the single source of truth for history and popup
 //! state; the client only sends a command and prints the reply.
 
+mod autopaste;
 mod clipboard;
 mod config;
+mod image;
 mod ipc;
 mod log;
 mod paths;
@@ -32,6 +34,18 @@ pub struct App {
     /// Last text we wrote to the clipboard ourselves, used to ignore the
     /// resulting owner-change echo (see `clipboard::on_owner_change`).
     pub last_own_write: Option<String>,
+    /// Last image content hash we wrote to the clipboard ourselves (set on image
+    /// paste-back) so the owner-change echo is ignored instead of being
+    /// re-encoded and re-hashed.
+    pub last_own_write_hash: Option<u64>,
+    /// X11 connection for auto-paste (focus hand-back + XTEST key synthesis).
+    /// `None` when the feature is off, or no display/XTEST is available.
+    pub x11: Option<autopaste::X11>,
+    /// Window that held focus before the popup opened, restored on auto-paste.
+    pub prev_active: Option<u32>,
+    /// Timestamp of the most recent key event; passed to `_NET_ACTIVE_WINDOW` so
+    /// the WM accepts the focus request instead of rejecting a zero timestamp.
+    pub last_event_time: u32,
     pub window: Option<gtk::Window>,
     pub listbox: Option<gtk::ListBox>,
     /// Kept alive so the IPC fd watch is not dropped/removed.
@@ -53,6 +67,7 @@ fn main() -> ExitCode {
         "--hide" => client("HIDE"),
         "--quit" => client("QUIT"),
         "--ping" => client("PING"),
+        "--clear" => client("CLEAR"),
         "--help" | "-h" => {
             print_help();
             ExitCode::SUCCESS
@@ -97,10 +112,20 @@ fn run_daemon() -> ExitCode {
 
     let config = Config::load();
     let store = Store::load();
+    // Only open the extra X connection when auto-paste is actually wanted.
+    let x11 = if config.auto_paste {
+        autopaste::X11::connect()
+    } else {
+        None
+    };
     let app = Rc::new(RefCell::new(App {
         config,
         store,
         last_own_write: None,
+        last_own_write_hash: None,
+        x11,
+        prev_active: None,
+        last_event_time: 0,
         window: None,
         listbox: None,
         ipc_source: None,
@@ -138,6 +163,7 @@ COMMANDS:
     --show      Show the popup
     --hide      Hide the popup
     --ping      Check whether the daemon is running
+    --clear     Remove all unpinned history entries (pinned are kept)
     --quit      Ask the daemon to exit
     -h, --help  Print this help
     -V, --version

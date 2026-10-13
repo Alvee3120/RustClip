@@ -12,6 +12,8 @@
 //! * It is a decoration-less `Toplevel` with a `PopupMenu` type hint: it looks
 //!   like a menu but still receives keyboard focus (a real `WindowType::Popup`
 //!   would not, and Up/Down/Enter would not reach us).
+//! * Image rows show their stored thumbnail directly; the thumbnail was scaled
+//!   to `thumbnail_px` at capture time, so no resizing happens while drawing.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -20,6 +22,7 @@ use gtk::prelude::*;
 use gtk::pango;
 
 use crate::log;
+use crate::paths;
 use crate::storage::{Item, Kind};
 use crate::App;
 
@@ -55,19 +58,38 @@ fn ensure_window(app: &Rc<RefCell<App>>) {
     let listbox = gtk::ListBox::new();
     listbox.set_selection_mode(gtk::SelectionMode::Single);
     scroller.add(&listbox);
-    window.add(&scroller);
+
+    // Footer with the key hints, so pin/delete/clear are discoverable without a
+    // manual — the same role Win+V's per-row buttons play.
+    let footer = gtk::Label::new(Some(
+        "Enter copy · P pin · Del remove · Ctrl+Del clear all · Esc close",
+    ));
+    footer.set_sensitive(false);
+    footer.set_margin_top(4);
+    footer.set_margin_bottom(4);
+    footer.set_margin_start(8);
+    footer.set_margin_end(8);
+    footer.set_ellipsize(pango::EllipsizeMode::End);
+
+    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    vbox.pack_start(&scroller, true, true, 0);
+    vbox.pack_start(&footer, false, false, 0);
+    window.add(&vbox);
 
     // Close on focus loss (click outside, alt-tab, another window appears).
-    window.connect_focus_out_event(|w, _ev| {
-        w.hide();
-        glib::Propagation::Proceed
-    });
+    {
+        let app_focus = app.clone();
+        window.connect_focus_out_event(move |_w, _ev| {
+            hide(&app_focus);
+            glib::Propagation::Proceed
+        });
+    }
 
     // Keyboard navigation.
     {
         let app_key = app.clone();
-        window.connect_key_press_event(move |w, ev| {
-            handle_key(&app_key, w, ev);
+        window.connect_key_press_event(move |_w, ev| {
+            handle_key(&app_key, ev);
             glib::Propagation::Stop
         });
     }
@@ -93,6 +115,10 @@ pub fn show(app: &Rc<RefCell<App>>) {
         Some(w) => w,
         None => return,
     };
+
+    // Remember what had focus, so auto-paste can send Ctrl+V back to it.
+    record_previous_window(app);
+
     window.show_all();
     window.present();
 
@@ -105,11 +131,40 @@ pub fn show(app: &Rc<RefCell<App>>) {
     log::debug("popup shown");
 }
 
-/// Hide the popup if it exists. Idempotent.
+/// Hide the popup and release its widget tree.
+///
+/// The window is *destroyed* rather than merely hidden, so the row widgets and
+/// the thumbnails they hold are freed between uses; `ensure_window` rebuilds it
+/// on the next show. Destruction is deferred to an idle callback so we never
+/// tear down widgets from inside an event handler (focus-out, key press) that is
+/// still dispatching to them.
 pub fn hide(app: &Rc<RefCell<App>>) {
-    if let Some(window) = app.borrow().window.clone() {
-        window.hide();
-    }
+    let window = match app.borrow().window.clone() {
+        Some(w) => w,
+        None => return,
+    };
+    window.hide();
+
+    let app = app.clone();
+    glib::idle_add_local_once(move || {
+        // A quick re-show may have intervened; only destroy if still hidden.
+        let still_hidden = app
+            .borrow()
+            .window
+            .as_ref()
+            .map(|w| !w.is_visible())
+            .unwrap_or(false);
+        if !still_hidden {
+            return;
+        }
+        if let Some(window) = app.borrow_mut().window.take() {
+            // `close` is the safe equivalent of destroying the toplevel: with no
+            // delete-event handler it tears the window (and its widget tree) down.
+            window.close();
+            log::debug("popup window destroyed");
+        }
+        app.borrow_mut().listbox = None;
+    });
 }
 
 /// Toggle visibility — the action behind `Super+V`.
@@ -180,7 +235,7 @@ fn rebuild(app: &Rc<RefCell<App>>) {
     app.borrow_mut().shown = shown;
 }
 
-/// Build one `index  kind  preview  [pin]` row.
+/// Build one `n  icon  preview  [pin]` row.
 fn build_row(index: usize, item: &Item, preview_chars: usize) -> gtk::ListBoxRow {
     let row = gtk::ListBoxRow::new();
     let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -195,16 +250,16 @@ fn build_row(index: usize, item: &Item, preview_chars: usize) -> gtk::ListBoxRow
     number.set_sensitive(false);
     hbox.pack_start(&number, false, false, 0);
 
-    let badge = match item.kind {
-        Kind::Url => "link",
-        Kind::Image => "image",
-        Kind::Text => "text",
+    // Leading icon: a link glyph for URLs, a generic text glyph for text, and
+    // the stored thumbnail for images.
+    let icon = match item.kind {
+        Kind::Url => gtk::Image::from_icon_name(Some("insert-link"), gtk::IconSize::Menu)
+            .upcast::<gtk::Widget>(),
+        Kind::Text => gtk::Image::from_icon_name(Some("text-x-generic"), gtk::IconSize::Menu)
+            .upcast::<gtk::Widget>(),
+        Kind::Image => image_thumb_widget(item),
     };
-    let kind_label = gtk::Label::new(Some(badge));
-    kind_label.set_width_chars(5);
-    kind_label.set_xalign(0.0);
-    kind_label.set_sensitive(false);
-    hbox.pack_start(&kind_label, false, false, 0);
+    hbox.pack_start(&icon, false, false, 0);
 
     let preview = gtk::Label::new(None);
     preview.set_text(&item.preview(preview_chars));
@@ -223,15 +278,43 @@ fn build_row(index: usize, item: &Item, preview_chars: usize) -> gtk::ListBoxRow
     row
 }
 
+/// Leading widget for an image row: the saved thumbnail when it loads, else a
+/// generic image icon. A missing sidecar is not an error — the entry may simply
+/// have been created by an older build.
+fn image_thumb_widget(item: &Item) -> gtk::Widget {
+    if let Some(name) = &item.thumb {
+        if let Ok(pixbuf) = gtk::gdk_pixbuf::Pixbuf::from_file(paths::image_dir().join(name)) {
+            return gtk::Image::from_pixbuf(Some(&pixbuf)).upcast();
+        }
+        log::debug(&format!("thumbnail {} could not be loaded", name));
+    }
+    gtk::Image::from_icon_name(Some("image-x-generic"), gtk::IconSize::Menu).upcast()
+}
+
 /// Translate a key press into navigation/activation actions.
-fn handle_key(app: &Rc<RefCell<App>>, window: &gtk::Window, ev: &gtk::gdk::EventKey) {
+fn handle_key(app: &Rc<RefCell<App>>, ev: &gtk::gdk::EventKey) {
     use gtk::gdk::keys::constants as key;
 
+    let ctrl = ev.state().contains(gtk::gdk::ModifierType::CONTROL_MASK);
+    // Keep the event timestamp so _NET_ACTIVE_WINDOW (auto-paste) is accepted.
+    app.borrow_mut().last_event_time = ev.time();
+
     match ev.keyval() {
-        key::Escape => window.hide(),
+        key::Escape => hide(app),
         key::Return => activate_selected(app),
         key::Up => move_selection(app, -1),
         key::Down => move_selection(app, 1),
+        // Delete removes the highlighted entry; Ctrl+Delete clears everything
+        // that is not pinned.
+        key::Delete => {
+            if ctrl {
+                clear_history(app);
+            } else {
+                delete_selected(app);
+            }
+        }
+        // P pins/unpins the highlighted entry so it survives eviction and clears.
+        key::p | key::P => toggle_pin_selected(app),
         // Quick-select: the number keys 1..9 map to rows 0..8.
         key::_1 => activate_index(app, 0),
         key::_2 => activate_index(app, 1),
@@ -244,6 +327,95 @@ fn handle_key(app: &Rc<RefCell<App>>, window: &gtk::Window, ev: &gtk::gdk::Event
         key::_9 => activate_index(app, 8),
         _ => {}
     }
+}
+
+/// Index of the currently highlighted row, if any.
+fn selected_index(app: &Rc<RefCell<App>>) -> Option<i32> {
+    let listbox = app.borrow().listbox.clone()?;
+    listbox.selected_row().map(|r| r.index())
+}
+
+/// Highlight the row at `index` if the list is long enough.
+fn select_row(app: &Rc<RefCell<App>>, index: i32) {
+    if index < 0 {
+        return;
+    }
+    if let Some(listbox) = app.borrow().listbox.clone() {
+        if let Some(row) = listbox.row_at_index(index) {
+            listbox.select_row(Some(&row));
+        }
+    }
+}
+
+/// Persist the history, logging (not propagating) failures: the in-memory state
+/// is already correct, and a failed write is not worth aborting the UI over.
+fn persist(app: &Rc<RefCell<App>>) {
+    if let Err(e) = app.borrow().store.save() {
+        log::error(&format!("history save failed: {}", e));
+    }
+}
+
+/// Store id behind the highlighted row, if any.
+fn selected_id(app: &Rc<RefCell<App>>) -> Option<u64> {
+    let index = selected_index(app)?;
+    app.borrow().shown.get(index as usize).copied()
+}
+
+/// Toggle the pin flag on the highlighted entry, then rebuild so the row's
+/// "pinned" marker updates. Pinned entries survive eviction and "clear".
+fn toggle_pin_selected(app: &Rc<RefCell<App>>) {
+    let (index, id) = match selected_index(app).zip(selected_id(app)) {
+        Some(pair) => pair,
+        None => return,
+    };
+    if !app.borrow_mut().store.toggle_pin(id) {
+        return;
+    }
+    persist(app);
+    rebuild(app);
+    select_row(app, index);
+}
+
+/// Remove the highlighted entry (and its image sidecars, if any), keeping the
+/// highlight at the same position when possible.
+fn delete_selected(app: &Rc<RefCell<App>>) {
+    let index = match selected_index(app) {
+        Some(i) => i,
+        None => return,
+    };
+    let id = match selected_id(app) {
+        Some(id) => id,
+        None => return,
+    };
+    if !app.borrow_mut().store.remove(id) {
+        return;
+    }
+    persist(app);
+    rebuild(app);
+    let count = app
+        .borrow()
+        .listbox
+        .as_ref()
+        .map(|l| l.children().len() as i32)
+        .unwrap_or(0);
+    select_row(app, index.min(count - 1));
+}
+
+/// Remove every unpinned entry; pinned entries are kept. Shared by Ctrl+Delete
+/// in the popup and `cliprust --clear`.
+pub fn clear_history(app: &Rc<RefCell<App>>) {
+    let changed = {
+        let mut a = app.borrow_mut();
+        let before = a.store.items.len();
+        a.store.clear_unpinned();
+        a.store.items.len() != before
+    };
+    if !changed {
+        return;
+    }
+    persist(app);
+    rebuild(app);
+    select_row(app, 0);
 }
 
 /// Move the highlight by `delta`, wrapping around the ends.
@@ -273,7 +445,8 @@ fn activate_selected(app: &Rc<RefCell<App>>) {
     activate_index(app, index);
 }
 
-/// Copy the row at `index` back to the clipboard and close the popup.
+/// Copy the row at `index` back to the clipboard and close the popup. Text,
+/// URLs and images are all supported.
 fn activate_index(app: &Rc<RefCell<App>>, index: i32) {
     if index < 0 {
         return;
@@ -283,34 +456,57 @@ fn activate_index(app: &Rc<RefCell<App>>, index: i32) {
         None => return,
     };
 
-    // Pull the text out; images are not selectable yet (stage 2).
-    let (text, auto_paste) = {
+    // Snapshot everything needed, then release the borrow before touching GTK.
+    let snapshot = {
         let a = app.borrow();
         let item = match a.store.items.iter().find(|it| it.id == id) {
             Some(i) => i,
             None => return,
         };
         (
+            item.kind,
             item.clipboard_text().map(|s| s.to_string()),
+            item.file.clone(),
+            item.hash,
             a.config.auto_paste,
         )
     };
-    let text = match text {
-        Some(t) => t,
-        None => {
-            log::warn("selected an image entry, which stage 1 cannot copy back");
-            return;
-        }
-    };
-
-    log::debug(&format!("copying entry {} back to the clipboard", id));
-
-    // Mark this write so the clipboard monitor does not promote it to the top
-    // (it is already there).
-    app.borrow_mut().last_own_write = Some(text.clone());
+    let (kind, text, file, hash, auto_paste) = snapshot;
 
     let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
-    clipboard.set_text(&text);
+
+    match kind {
+        Kind::Image => {
+            let name = match file {
+                Some(f) => f,
+                None => {
+                    log::warn("image entry has no sidecar file");
+                    return;
+                }
+            };
+            let pixbuf = match gtk::gdk_pixbuf::Pixbuf::from_file(paths::image_dir().join(&name)) {
+                Ok(p) => p,
+                Err(e) => {
+                    log::warn(&format!("could not load image {}: {}", name, e));
+                    return;
+                }
+            };
+            log::debug(&format!("copying image entry {} back to the clipboard", id));
+            // Mark our own write so the monitor ignores the echo.
+            app.borrow_mut().last_own_write_hash = hash;
+            clipboard.set_image(&pixbuf);
+        }
+        Kind::Text | Kind::Url => {
+            let text = match text {
+                Some(t) => t,
+                None => return,
+            };
+            log::debug(&format!("copying entry {} back to the clipboard", id));
+            app.borrow_mut().last_own_write = Some(text.clone());
+            clipboard.set_text(&text);
+        }
+    }
+
     // store() hands the selection to the clipboard manager so it survives the
     // process losing ownership (and, if a manager is configured, a reboot).
     clipboard.store();
@@ -318,8 +514,52 @@ fn activate_index(app: &Rc<RefCell<App>>, index: i32) {
     hide(app);
 
     if auto_paste {
-        // Stage 4: re-activate the previously focused window, wait
-        // config.paste_delay_ms, then synthesise Ctrl+V via XTest.
-        log::info("auto_paste is enabled but Ctrl+V synthesis lands in stage 4");
+        perform_auto_paste(app);
+    }
+}
+
+/// Remember the window that had focus before the popup opened, for auto-paste.
+/// Only computed when auto-paste is enabled (it needs the X11 connection).
+fn record_previous_window(app: &Rc<RefCell<App>>) {
+    let prev = {
+        let a = app.borrow();
+        if a.config.auto_paste {
+            a.x11.as_ref().and_then(|x| x.active_window())
+        } else {
+            None
+        }
+    };
+    log::debug(&format!("auto-paste: previous window = {:?}", prev));
+    app.borrow_mut().prev_active = prev;
+}
+
+/// Hand focus back to the pre-popup window, wait `paste_delay_ms`, then
+/// synthesise Ctrl+V. Best-effort: failures are logged, never fatal.
+fn perform_auto_paste(app: &Rc<RefCell<App>>) {
+    let (prev, delay, timestamp) = {
+        let a = app.borrow();
+        (
+            a.prev_active,
+            a.config.paste_delay_ms.min(5000),
+            a.last_event_time,
+        )
+    };
+    let prev = match prev {
+        Some(w) => w,
+        None => {
+            log::warn("auto-paste: no previous window was recorded");
+            return;
+        }
+    };
+
+    let result = {
+        let a = app.borrow();
+        match a.x11.as_ref() {
+            Some(x11) => crate::autopaste::deliver(x11, prev, delay, timestamp),
+            None => Err("no X11 connection available".to_string()),
+        }
+    };
+    if let Err(e) = result {
+        log::warn(&format!("auto-paste: {}", e));
     }
 }

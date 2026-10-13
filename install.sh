@@ -16,9 +16,10 @@
 # `./install.sh --uninstall`.
 #
 # Usage:
-#   ./install.sh              install (or upgrade)
-#   ./install.sh --no-deps    skip the apt dependency step
-#   ./install.sh --uninstall  remove binary, autostart entry and shortcut
+#   ./install.sh                install (or upgrade)
+#   ./install.sh --no-deps      skip the apt dependency step
+#   ./install.sh --no-autostart do not create the autostart entry
+#   ./install.sh --uninstall    remove binary, autostart entry and shortcut
 #   ./install.sh --help
 
 set -euo pipefail
@@ -40,6 +41,13 @@ info() { printf '%s==>%s %s\n' "${C_OK}" "${C_OFF}" "$*"; }
 warn() { printf '%s==>%s %s\n' "${C_WARN}" "${C_OFF}" "$*" >&2; }
 die()  { printf '%s==>%s %s\n' "${C_ERR}" "${C_OFF}" "$*" >&2; exit 1; }
 
+# Print the header comment block as help. We stop at the first non-comment line
+# rather than hard-coding a line range, so editing this file cannot silently
+# truncate the help text.
+print_usage() {
+    awk 'NR > 1 { if ($0 ~ /^#/) { sub(/^# ?/, ""); print } else { exit } }' "${BASH_SOURCE[0]}"
+}
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 # ---------------------------------------------------------------------------
@@ -47,12 +55,14 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # ---------------------------------------------------------------------------
 MODE="install"
 SKIP_DEPS=0
+NO_AUTOSTART=0
 for arg in "$@"; do
     case "$arg" in
-        --uninstall) MODE="uninstall" ;;
-        --no-deps)   SKIP_DEPS=1 ;;
-        -h|--help)   sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *)           die "unknown argument: $arg" ;;
+        --uninstall)    MODE="uninstall" ;;
+        --no-deps)      SKIP_DEPS=1 ;;
+        --no-autostart) NO_AUTOSTART=1 ;;
+        -h|--help)      print_usage; exit 0 ;;
+        *)              die "unknown argument: $arg" ;;
     esac
 done
 
@@ -159,6 +169,7 @@ Terminal=false
 StartupNotify=false
 Categories=Utility;
 X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=2
 EOF
     info "autostart entry written to ${AUTOSTART_FILE}"
 }
@@ -236,7 +247,11 @@ case ":${PATH}:" in
 esac
 
 # 5. autostart ---------------------------------------------------------------
-install_autostart
+if [ "$NO_AUTOSTART" -eq 0 ]; then
+    install_autostart
+else
+    info "--no-autostart: skipping the autostart entry"
+fi
 
 # 6. hotkey ------------------------------------------------------------------
 info "registering ${HOTKEY} as a Cinnamon custom shortcut"
