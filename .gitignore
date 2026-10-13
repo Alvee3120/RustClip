@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+*.deb
+# History/socket artifacts should never be committed (they live in $HOME).
+history.json
+*.sock

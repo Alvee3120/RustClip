@@ -1,0 +1,69 @@
+[package]
+name = "cliprust"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Lightweight Win+V style clipboard history manager for Cinnamon/X11"
+authors = ["Alvee"]
+license = "MIT"
+readme = "README.md"
+repository = "https://example.invalid/cliprust"
+categories = ["gui", "command-line-utilities"]
+keywords = ["clipboard", "cinnamon", "gtk"]
+
+# ---------------------------------------------------------------------------
+# Dependencies. Every crate here is either required by the spec or is the
+# smallest thing that does the job. Nothing else gets pulled in.
+#
+#   gtk            - GTK3 bindings: gives us the clipboard owner-change signal,
+#                    the popup window and the widget set that matches Cinnamon.
+#   glib           - Already a Gtk dependency; we use it for the main-loop
+#                    integration of our IPC socket (glib::source::unix_fd_add).
+#   serde          - Derive-based (de)serialisation for the JSON history file.
+#   serde_json     - The JSON format itself. Tiny, no C dependency.
+#
+# Deliberately NOT used:
+#   * rusqlite        - drags in a C build of SQLite for a <=20 row dataset.
+#   * image / png     - GdkPixbuf (bundled with Gtk) already decodes/encodes
+#                       PNG and scales thumbnails; no need for a second codec.
+#   * log/env_logger  - a ~30 line stderr logger in src/log.rs is enough.
+#   * xdotool/x11rb   - key synthesis for auto-paste lands in a later stage;
+#                       see README "Auto-paste" for the tradeoff.
+# ---------------------------------------------------------------------------
+[dependencies]
+gtk = "0.18"
+glib = "0.18"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ---------------------------------------------------------------------------
+# Release profile tuned for small binary size. See README for measured numbers
+# and the opt-level="z" vs "3" comparison requested in the spec.
+# ---------------------------------------------------------------------------
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# ---------------------------------------------------------------------------
+# cargo-deb packaging metadata (stage 4 deliverable, wired up early so the
+# manifest does not change later). Build with: cargo deb
+# ---------------------------------------------------------------------------
+[package.metadata.deb]
+maintainer = "Alvee"
+copyright = "2026, Alvee"
+license-file = ["LICENSE", "0"]
+extended-description = """
+A lightweight clipboard history manager for Cinnamon/X11 that mimics
+Windows' Win+V. Captures text, links and images from the CLIPBOARD
+selection, keeps the most recent items, and shows a popup bound to Super+V.
+"""
+section = "utils"
+priority = "optional"
+depends = "$auto"
+assets = [
+    ["target/release/cliprust", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/cliprust/README.md", "644"],
+]
