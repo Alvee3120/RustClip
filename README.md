@@ -70,6 +70,8 @@ autostart entry created.
 | `cliprust --ping` | `PONG` if the daemon is running |
 | `cliprust --clear` | Remove all unpinned entries (pinned are kept) |
 | `cliprust --quit` | Ask the daemon to exit |
+| `cliprust --install-hotkey` | Register Super+V as a Cinnamon custom shortcut |
+| `cliprust --remove-hotkey` | Remove that shortcut |
 | `cliprust --help` / `--version` | Help / version |
 
 **Inside the popup:** `↑`/`↓` move, `Enter` copies the highlighted item, `1`–`9`
@@ -189,11 +191,25 @@ cargo deb
 
 This produces `target/debian/cliprust_<version>_amd64.deb` (~220 KB). It installs
 `/usr/bin/cliprust`, the README and the licence under `/usr/share/doc/cliprust/`,
-and declares the runtime libraries it links against (GTK3, GdkPixbuf, glib, libc)
-via `depends = "$auto"`.
+a system-wide autostart entry at `/etc/xdg/autostart/cliprust.desktop`, and
+declares the runtime libraries it links against (GTK3, GdkPixbuf, glib, libc)
+via `depends = "$auto"`, plus `libglib2.0-bin` for `gsettings`.
 
-The package installs the **binary only** — the autostart entry and Super+V
-binding are per-user and are still best set by `install.sh`.
+Installing the package is a complete setup:
+
+1. the autostart entry starts the daemon at the next login, and
+2. the daemon registers **Super+V** as a Cinnamon custom shortcut on its first
+   start, so no `install.sh` run is needed.
+
+The package's `postinst` also tries to do both immediately for the user who ran
+the install — register the binding and start the daemon — when it can reach that
+user's session bus and display. That is best-effort because a package hook runs
+as root: if it cannot reach a session (GUI package managers, a different user's
+session, or an install done over SSH), run `cliprust --install-hotkey` once as
+yourself. The shortcut is per-user by design — Cinnamon stores custom shortcuts
+in that user's dconf — so a package cannot create it for every user at install
+time. The same applies to `~/.config/autostart`: an entry there overrides the
+system-wide one.
 
 ## Size and idle RAM
 
@@ -304,8 +320,11 @@ protection (no direct pushes, code-owner review required, CI must pass). See
 ## Troubleshooting
 
 - **Super+V does nothing.** Check the daemon is alive with `cliprust --ping`.
-  If the shortcut is missing, re-run `./install.sh --no-deps`. Verify the
-  binding in *System Settings → Keyboard → Shortcuts → Custom Shortcuts*.
+  If the shortcut is missing, run `cliprust --install-hotkey` (or re-run
+  `./install.sh --no-deps`). Verify the binding in *System Settings → Keyboard
+  → Shortcuts → Custom Shortcuts*. A `.deb` install registers the binding on the
+  daemon's first start; run the command by hand if the package hook could not
+  reach your session.
 - **Popup opens in the wrong place.** It uses `WindowPosition::Mouse`; some WMs
   override it. This is cosmetic.
 - **Auto-paste does nothing.** It is off by default — set `auto_paste: true` and

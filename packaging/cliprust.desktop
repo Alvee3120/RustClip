@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ClipRust Clipboard History
+Comment=Win+V style clipboard history for Cinnamon
+Exec=/usr/bin/cliprust
+Icon=edit-paste
+Terminal=false
+StartupNotify=false
+Categories=Utility;
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=2

@@ -12,6 +12,7 @@
 mod autopaste;
 mod clipboard;
 mod config;
+mod hotkey;
 mod image;
 mod ipc;
 mod log;
@@ -68,6 +69,13 @@ fn main() -> ExitCode {
         "--quit" => client("QUIT"),
         "--ping" => client("PING"),
         "--clear" => client("CLEAR"),
+        "--install-hotkey" => report(hotkey::register()),
+        // An optional path narrows removal to one installation (the package's
+        // prerm passes /usr/bin/cliprust so a ~/.local/bin setup survives).
+        "--remove-hotkey" => match args.get(1) {
+            Some(target) => report(hotkey::unregister_matching(target)),
+            None => report(hotkey::unregister()),
+        },
         "--help" | "-h" => {
             print_help();
             ExitCode::SUCCESS
@@ -102,9 +110,27 @@ fn client(command: &str) -> ExitCode {
     }
 }
 
+/// Print the outcome of a hotkey operation.
+fn report(result: Result<String, String>) -> ExitCode {
+    match result {
+        Ok(msg) => {
+            println!("{}", msg);
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("cliprust: {}", e);
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// Run the daemon: initialise GTK, load state, attach the clipboard monitor and
 /// the IPC socket, then hand control to the GTK main loop.
 fn run_daemon() -> ExitCode {
+    // A packaged install has no per-user setup step, so make sure Super+V exists
+    // before anything else. Best-effort: a non-Cinnamon desktop just logs.
+    hotkey::ensure_registered();
+
     if let Err(e) = gtk::init() {
         log::error(&format!("failed to initialise GTK: {}", e));
         return ExitCode::FAILURE;
@@ -165,6 +191,10 @@ COMMANDS:
     --ping      Check whether the daemon is running
     --clear     Remove all unpinned history entries (pinned are kept)
     --quit      Ask the daemon to exit
+    --install-hotkey
+                Register Super+V as a Cinnamon custom shortcut
+    --remove-hotkey
+                Remove the Super+V shortcut again
     -h, --help  Print this help
     -V, --version
                 Print the version

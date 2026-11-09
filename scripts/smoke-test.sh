@@ -42,6 +42,9 @@ WORK="$(mktemp -d)"
 export XDG_DATA_HOME="$WORK/data"
 export XDG_CONFIG_HOME="$WORK/config"
 export XDG_RUNTIME_DIR="$WORK/run"
+# Keep the daemon from registering Super+V in the real Cinnamon session: the
+# hotkey is user-global and would point at this throwaway test binary.
+export XDG_CURRENT_DESKTOP=cliprust-smoke
 mkdir -p "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME/cliprust"
 chmod 700 "$XDG_RUNTIME_DIR"
 export CLIPRUST_LOG=debug

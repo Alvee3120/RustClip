@@ -66,96 +66,6 @@ for arg in "$@"; do
     esac
 done
 
-# ---------------------------------------------------------------------------
-# Cinnamon shortcut management (shared by install/uninstall)
-# ---------------------------------------------------------------------------
-# We drive gsettings from a small Python helper because the custom shortcut
-# list is a GVariant array that must be *merged*, not overwritten, or we would
-# wipe the user's other custom shortcuts.
-run_hotkey_helper() {
-    python3 - "$@" <<'PYEOF'
-import ast
-import subprocess
-import sys
-
-BASE = "org.cinnamon.desktop.keybindings"
-RELO = BASE + ".custom-keybinding:/org/cinnamon/desktop/keybindings/custom-keybindings/{}/"
-NAME = "ClipRust Clipboard History"
-BINDING = "['<Super>v']"
-
-
-def gs_get(schema, key):
-    return subprocess.check_output(["gsettings", "get", schema, key], text=True).strip()
-
-
-def gs_set(schema, key, value):
-    subprocess.check_call(["gsettings", "set", schema, key, value])
-
-
-def read_entries():
-    raw = gs_get(BASE, "custom-list")
-    if raw in ("@as []", "[]"):
-        return []
-    try:
-        return list(ast.literal_eval(raw))
-    except Exception:
-        return []
-
-
-def write_entries(entries):
-    value = "[" + ", ".join("'" + e + "'" for e in entries) + "]"
-    gs_set(BASE, "custom-list", value)
-
-
-def command_of(entry):
-    try:
-        out = gs_get(RELO.format(entry), "command")
-    except subprocess.CalledProcessError:
-        return ""
-    return out.strip().strip("'")
-
-
-def add(command):
-    entries = read_entries()
-    target = next((e for e in entries if "cliprust" in command_of(e)), None)
-    if target is None:
-        used = set(entries)
-        i = 0
-        while "custom{}".format(i) in used:
-            i += 1
-        target = "custom{}".format(i)
-        entries.append(target)
-    write_entries(entries)
-    gs_set(RELO.format(target), "name", "'" + NAME + "'")
-    gs_set(RELO.format(target), "command", "'" + command + "'")
-    gs_set(RELO.format(target), "binding", BINDING)
-    print("bound {} -> {}".format(BINDING, command))
-
-
-def remove():
-    entries = read_entries()
-    keep = [e for e in entries if "cliprust" not in command_of(e)]
-    if keep != entries:
-        write_entries(keep)
-        print("removed cliprust shortcut")
-    else:
-        print("no cliprust shortcut found")
-
-
-if len(sys.argv) < 2:
-    sys.exit("usage: helper add|remove [command]")
-action = sys.argv[1]
-if action == "add":
-    if len(sys.argv) < 3:
-        sys.exit("helper add needs the command path")
-    add(sys.argv[2])
-elif action == "remove":
-    remove()
-else:
-    sys.exit("unknown action: " + action)
-PYEOF
-}
-
 install_autostart() {
     mkdir -p "${AUTOSTART_DIR}"
     cat > "${AUTOSTART_FILE}" <<EOF
@@ -186,7 +96,7 @@ if [ "$MODE" = "uninstall" ]; then
         info "removed ${AUTOSTART_FILE}"
     fi
 
-    run_hotkey_helper remove || warn "could not update Cinnamon shortcuts"
+    "${BIN_PATH}" --remove-hotkey || warn "could not remove the Cinnamon shortcut"
 
     if [ -f "${BIN_PATH}" ]; then
         rm -f "${BIN_PATH}"
@@ -211,7 +121,7 @@ if [ "$SKIP_DEPS" -eq 0 ]; then
     else
         info "installing build dependencies (sudo required)"
         sudo apt-get update
-        sudo apt-get install -y libgtk-3-dev build-essential pkg-config python3
+        sudo apt-get install -y libgtk-3-dev build-essential pkg-config
     fi
 else
     info "--no-deps: skipping the apt step"
@@ -255,7 +165,7 @@ fi
 
 # 6. hotkey ------------------------------------------------------------------
 info "registering ${HOTKEY} as a Cinnamon custom shortcut"
-run_hotkey_helper add "${BIN_PATH} --toggle" || warn "could not register the shortcut"
+"${BIN_PATH}" --install-hotkey || warn "could not register the shortcut"
 
 # 7. start now ---------------------------------------------------------------
 if "${BIN_PATH}" --ping >/dev/null 2>&1; then

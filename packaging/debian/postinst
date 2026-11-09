@@ -1,0 +1,47 @@
+#!/bin/sh
+# cliprust postinst.
+#
+# The package ships a system-wide autostart entry and the daemon registers
+# Super+V itself on first start. This hook only tries to make the setup work
+# immediately for the user who ran the install, without waiting for a re-login.
+# It is best-effort: a failure here must never fail the package installation.
+
+# Resolve the user who invoked the install, then run a command in their session.
+# Prints nothing and returns non-zero when there is no reachable user session.
+run_in_user_session() {
+    user="${SUDO_USER:-}"
+    if [ -z "$user" ] && [ -n "${PKEXEC_UID:-}" ]; then
+        user="$(getent passwd "$PKEXEC_UID" | cut -d: -f1)"
+    fi
+    if [ -z "$user" ] || [ "$user" = "root" ]; then
+        return 1
+    fi
+    command -v runuser >/dev/null 2>&1 || return 1
+
+    uid="$(id -u "$user" 2>/dev/null)" || return 1
+    home="$(getent passwd "$user" | cut -d: -f6)"
+    [ -S "/run/user/$uid/bus" ] || return 1
+
+    runuser -u "$user" -- env \
+        HOME="$home" \
+        DISPLAY="${DISPLAY:-}" \
+        XDG_RUNTIME_DIR="/run/user/$uid" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+        "$@"
+}
+
+if [ "${1:-}" = "configure" ]; then
+    # Register now so the shortcut exists even before the daemon starts.
+    run_in_user_session /usr/bin/cliprust --install-hotkey >/dev/null 2>&1 || true
+
+    # Start the daemon right away when we have a display. A second instance is
+    # harmless: the daemon refuses to start if it can already reach the socket.
+    if [ -n "${DISPLAY:-}" ]; then
+        run_in_user_session setsid /usr/bin/cliprust >/dev/null 2>&1 &
+    fi
+
+    echo "ClipRust starts automatically at login and binds Super+V on first run."
+    echo "If the shortcut is missing, run: cliprust --install-hotkey"
+fi
+
+exit 0

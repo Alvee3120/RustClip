@@ -1,6 +1,6 @@
 [package]
 name = "cliprust"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.74"
 description = "Lightweight Win+V style clipboard history manager for Cinnamon/X11"
@@ -67,8 +67,12 @@ selection, keeps the most recent items, and shows a popup bound to Super+V.
 """
 section = "utils"
 priority = "optional"
-depends = "$auto"
+# gsettings (libglib2.0-bin) is not picked up by `$auto` because we exec it at
+# runtime: the daemon uses it to register the Super+V shortcut on first start.
+depends = "$auto, libglib2.0-bin"
 assets = [
     ["target/release/cliprust", "usr/bin/", "755"],
     ["README.md", "usr/share/doc/cliprust/README.md", "644"],
+    ["packaging/cliprust.desktop", "etc/xdg/autostart/cliprust.desktop", "644"],
 ]
+maintainer-scripts = "packaging/debian"
