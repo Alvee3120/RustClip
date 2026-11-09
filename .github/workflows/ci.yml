@@ -14,7 +14,10 @@ env:
 jobs:
   check:
     name: check
-    runs-on: ubuntu-latest
+    # Pinned to the base of the target distro (Mint 22 / Ubuntu 24.04). The
+    # ubuntu-latest image moved to 26.04, where xclip image transfer into GTK3
+    # fails and the smoke test cannot pass.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -43,7 +46,7 @@ jobs:
 
   smoke:
     name: smoke
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: check
     steps:
       - uses: actions/checkout@v4
